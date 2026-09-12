@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GEOscope</title><link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main>
+  <header><h1>GEOscope</h1><p>Local GEO expression analysis</p></header>
+  <section class="hero">
+    <h2>Start an analysis</h2>
+    <p>Load a GEO series and select samples, phenotype groups, and genes for analysis.</p>
+    <form id="start-form" class="start-form">
+      <label for="accession">GEO accession</label>
+      <input id="accession" placeholder="GSE48558" autocomplete="off">
+      <button type="submit">Start analysis</button>
+    </form>
+    <span id="status" role="status" aria-live="polite"></span>
+  </section>
+  <section>
+    <h2>Previous analyses</h2>
+    <div id="history">Loading history...</div>
+  </section>
+</main>
+<script src="/static/home.js"></script>
+</body>
+</html>

@@ -1,0 +1,2 @@
+[console_scripts]
+geoscope = app.main:run

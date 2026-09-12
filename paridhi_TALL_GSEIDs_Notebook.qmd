@@ -1,0 +1,181 @@
+---
+title: "paridhi_TALL_GSEIDs_Notebook"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(GEOquery)
+library(Biobase)
+library(ggpubr)
+```
+
+```{r}
+genes <- c("CD5","CD7","TRBC1","TRBC2","CD99", "CD1A")
+
+lineage_colors <- c(
+  "AML Cell Line"    = "#D62728",  # red = myeloid malignant
+  "AML Patient"      = "#FF9896",  # light red
+
+  "B ALL Cell Line"  = "#1F77B4",  # blue = B-lineage malignant
+  "B ALL Patient"    = "#AEC7E8",  # light blue
+
+  "T ALL Cell Line"  = "#2CA02C",  # green = T-lineage malignant
+  "T ALL Patient"    = "#98DF8A",  # light green
+
+  "B Cells"          = "#17BECF",  # teal = normal B-lineage
+  "T Cells"          = "#9EDAE5",  # light teal = normal T-lineage
+
+  "CD34+HSPC"        = "#9467BD",  # purple = progenitor/stem
+  "Granulocytes"     = "#FF7F0E",  # orange = normal myeloid
+  "Monocytes"        = "#FFBB78"   # light orange
+)
+
+vibrant_colors <- c("#E64B35", "#4DBBD5", "#00A087", "#F39B7F", "#8491B4")
+```
+
+```{r}
+plot_violin <- function(data,
+                         x_var,
+                         y_var,
+                         facet_var = NULL,
+                         y_label = "log2(quantile-normalized intensity)",
+                         colors = vibrant_colors,
+                         test_method = "wilcox.test") {
+  
+  p <- data %>%
+    ggplot(aes(x = .data[[x_var]], y = .data[[y_var]], fill = .data[[x_var]])) +
+    geom_violin(trim = FALSE, alpha = 0.75, linewidth = 0.5, color = "black") +
+    geom_boxplot(width = 0.12, fill = "white", outlier.shape = NA, linewidth = 0.4) +
+    geom_jitter(width = 0.06, size = 0.9, alpha = 0.5, color = "black") +
+    stat_compare_means(
+      method = test_method,
+      label = "p.signif",
+      size = 7,
+      label.x.npc = 0.5,
+      label.y.npc = 0.95,
+      hjust = 0.5
+    ) +
+    scale_fill_manual(values = colors) +
+    labs(x = NULL, y = y_label, fill = x_var) +
+    theme_classic(base_size = 13, base_family = "Helvetica") +
+    theme(
+      strip.background = element_rect(fill = "gray95", color = NA),
+      strip.text = element_text(face = "bold", size = 11),
+      axis.text.x = element_text(angle = 30, hjust = 1, size = 10),
+      axis.title.y = element_text(size = 12, margin = margin(r = 8)),
+      legend.position = "none",
+      panel.grid = element_blank(),
+      panel.spacing = unit(1, "lines"),
+      plot.margin = margin(10, 10, 10, 10)
+    )
+  
+  if (!is.null(facet_var)) {
+    p <- p + facet_wrap(vars(.data[[facet_var]]), scales = "free_y")
+  }
+  
+  p
+}
+```
+
+```{r}
+get_geo_expression_data <- function(gse_id,
+                                     platform_idx = 1,
+                                     gene_assign_col = "gene_assignment",
+                                     pheno_cols = NULL) {
+  
+  ## 1. Pull the series
+  gse <- getGEO(gse_id, GSEMatrix = TRUE)[[platform_idx]]
+  
+  ## 2. Extract expression matrix, phenotype, and annotation
+  expr_mat <- exprs(gse)
+  pheno    <- pData(gse) %>% rownames_to_column("sample")
+  anno     <- fData(gse) %>% rownames_to_column("probe_id")
+  
+  if (!is.null(pheno_cols)) {
+    pheno <- pheno %>% select(sample, all_of(pheno_cols))
+  }
+  
+  ## 3. Keep only real gene probes, extract gene symbol(s) per probe
+  anno_main <- anno %>%
+    filter(category == "main") %>%
+    mutate(
+      gene_symbol = map_chr(.data[[gene_assign_col]], ~ {
+        if (is.na(.x) || .x == "" || .x == "---") return(NA_character_)
+        entries <- str_split(.x, "\\s*///\\s*")[[1]]
+        symbols <- map_chr(entries, ~ {
+          parts <- str_split(.x, "\\s*//\\s*")[[1]]
+          if (length(parts) >= 2) trimws(parts[2]) else NA_character_
+        })
+        symbols <- unique(symbols[!is.na(symbols) & symbols != "---"])
+        if (length(symbols) == 0) NA_character_ else paste(symbols, collapse = "/")
+      })
+    ) %>%
+    select(probe_id, gene_symbol) %>%
+    separate_rows(gene_symbol, sep = "/")
+  
+  ## 4. Collapse any remaining duplicate probe_id rows into one row per probe
+  anno_collapsed <- anno_main %>%
+    group_by(probe_id) %>%
+    summarise(gene_symbol = paste(unique(gene_symbol), collapse = "/"), .groups = "drop")
+  
+  ## 5. Reshape expression to long: probe_id | sample | value
+  expr_long <- expr_mat %>%
+    as.data.frame() %>%
+    rownames_to_column("probe_id") %>%
+    pivot_longer(-probe_id, names_to = "sample", values_to = "value")
+  
+  ## 6. Attach gene symbols
+  expr_long <- expr_long %>%
+    left_join(anno_collapsed, by = "probe_id")
+  
+  ## 7. Merge with phenotype
+  merged <- expr_long %>%
+    left_join(pheno, by = "sample")
+  
+  ## 8. Sanity checks
+  stopifnot(nrow(merged) == nrow(expr_long))
+  message(sprintf("%d samples, %d probes, %d total rows",
+                   ncol(expr_mat), nrow(expr_mat), nrow(merged)))
+  message(sprintf("%d / %d rows have no gene symbol match",
+                   sum(is.na(merged$gene_symbol)), nrow(merged)))
+  
+  merged
+}
+
+GSE48558 <- get_geo_expression_data("GSE48558",
+                                    pheno_cols = c("description", 
+                                                   "phenotype:ch1"))
+```
+
+```{r}
+merged_clean <- merged %>%
+  filter(!is.na(gene_symbol)) %>%
+  filter(gene_symbol %in% genes) %>%
+  select(
+    probe_id,
+    gene_symbol,
+    sample,
+    value,
+    title,
+    source_name_ch1,
+    organism_ch1,
+    `characteristics_ch1`,
+    `phenotype:ch1`
+  )
+
+merged_clean <- merged_clean %>% select(!probe_id)
+
+merged %>%
+  distinct(gene_symbol) %>%
+  filter(str_detect(gene_symbol, "CD5|CD7|TRBC|CD99"))
+
+plot_violin(
+  data = merged_clean,
+  x_var = "phenotype:ch1",
+  y_var = "value",
+  facet_var = "gene_symbol"
+)
+```
+
