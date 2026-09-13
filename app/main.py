@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import sys
 import threading
 import uuid
@@ -284,6 +287,40 @@ def analysis_export(analysis_id: str, format_name: str):
     return FileResponse(target, filename=target.name)
 
 
+def _clean_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    original = env.pop("LD_LIBRARY_PATH_ORIG", None)
+    if original:
+        env["LD_LIBRARY_PATH"] = original
+    else:
+        env.pop("LD_LIBRARY_PATH", None)
+    env.pop("LD_PRELOAD", None)
+    return env
+
+
+def _open_browser(url: str) -> bool:
+    if sys.platform == "win32":
+        try:
+            os.startfile(url)
+            return True
+        except OSError:
+            return webbrowser.open(url)
+    command = ["open", url] if sys.platform == "darwin" else ["xdg-open", url]
+    if shutil.which(command[0]):
+        try:
+            subprocess.Popen(
+                command,
+                env=_clean_subprocess_env(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return True
+        except OSError:
+            pass
+    return webbrowser.open(url)
+
+
 def _announce(url: str) -> None:
     print()
     print(f"GEOscope {app.version}")
@@ -328,7 +365,7 @@ def run() -> None:
     _announce(url)
 
     try:
-        webbrowser.open(url)
+        _open_browser(url)
     except Exception:
         pass
 
