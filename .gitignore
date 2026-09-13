@@ -1,4 +1,5 @@
 __pycache__/
 *.py[cod]
 dist/
-build/
+build/*
+!build/geoscope.spec

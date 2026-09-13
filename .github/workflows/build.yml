@@ -12,4 +12,6 @@ jobs:
       - run: python -m pip install --upgrade pip && pip install ".[build]"
       - run: pyinstaller build/geoscope.spec
       - uses: actions/upload-artifact@v4
-        with: { name: GEOscope-${{ matrix.os }}, path: dist/ }
+        with:
+          name: GEOscope-${{ matrix.os }}
+          path: dist/
