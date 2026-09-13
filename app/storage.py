@@ -52,6 +52,14 @@ class Store:
             )
             self.connection.commit()
 
+    def update_dataset_metadata(self, accession: str, metadata: dict[str, Any]) -> None:
+        with self._lock:
+            self.connection.execute(
+                "UPDATE datasets SET metadata = ?, updated_at = ? WHERE accession = ?",
+                (json.dumps(metadata), utc_now(), accession),
+            )
+            self.connection.commit()
+
     def save_analysis(self, analysis_id: str, accession: str, config: dict[str, Any], result_path: Path) -> None:
         with self._lock:
             self.connection.execute(

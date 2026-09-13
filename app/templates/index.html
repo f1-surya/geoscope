@@ -2,11 +2,29 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>GEOscope</title><link rel="stylesheet" href="/static/style.css">
+  <meta name="color-scheme" content="dark">
+  <title>GEOscope</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;550;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <main>
-  <header><h1>GEOscope</h1><p>Local GEO expression analysis</p></header>
+  <header>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M7 3c0 6 10 6 10 12M17 3c0 6-10 6-10 12"/>
+          <path d="M8.5 6h7M8.5 10h7M8.5 14h7M8.5 18h7"/>
+        </svg>
+      </span>
+      <div>
+        <h1>GEOscope</h1>
+        <p>Local GEO expression analysis</p>
+      </div>
+    </div>
+  </header>
   <section class="hero">
     <h2>Start an analysis</h2>
     <p>Load a GEO series and select samples, phenotype groups, and genes for analysis.</p>

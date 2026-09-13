@@ -5,7 +5,6 @@ Summary: Local GEO expression analysis application
 Requires-Python: >=3.10
 Requires-Dist: fastapi>=0.115
 Requires-Dist: uvicorn[standard]>=0.30
-Requires-Dist: GEOparse>=2.0
 Requires-Dist: pandas>=2.1
 Requires-Dist: numpy>=1.26
 Requires-Dist: scipy>=1.12

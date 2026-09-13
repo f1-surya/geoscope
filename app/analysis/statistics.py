@@ -37,7 +37,13 @@ def _test(values: pd.DataFrame, group_column: str) -> tuple[str, float, list[dic
     return "Kruskal-Wallis omnibus; pairwise Wilcoxon rank-sum with Benjamini-Hochberg correction", float(omnibus), pairwise
 
 
-def analyze(data: pd.DataFrame, genes: list[str], group_column: str, selected_samples: list[str] | None = None) -> dict[str, Any]:
+def analyze(
+    data: pd.DataFrame,
+    genes: list[str],
+    group_column: str,
+    selected_samples: list[str] | None = None,
+    progress: Any | None = None,
+) -> dict[str, Any]:
     if group_column not in data.columns:
         raise ValueError(f"Phenotype field '{group_column}' is not available.")
     filtered = _groups(data[data["gene_symbol"].isin(genes)], group_column, selected_samples)
@@ -45,9 +51,12 @@ def analyze(data: pd.DataFrame, genes: list[str], group_column: str, selected_sa
         raise ValueError("No numeric expression values remain for the selected genes and samples.")
     results = []
     pairwise = []
-    for gene, gene_data in filtered.groupby("gene_symbol", sort=True):
+    grouped = list(filtered.groupby("gene_symbol", sort=True))
+    for index, (gene, gene_data) in enumerate(grouped, start=1):
         method, omnibus, comparisons = _test(gene_data, group_column)
         summary = gene_data.groupby(group_column)["value"].agg(["count", "mean", "median", "std"]).reset_index().rename(columns={group_column: "group"})
         results.append({"gene": gene, "method": method, "p_value": omnibus, "summary": summary.to_dict("records")})
         pairwise.extend({"gene": gene, **comparison} for comparison in comparisons)
+        if progress is not None:
+            progress.fraction(index / len(grouped), f"{index}/{len(grouped)} genes")
     return {"results": results, "pairwise": pairwise, "method": results[0]["method"], "data": filtered}

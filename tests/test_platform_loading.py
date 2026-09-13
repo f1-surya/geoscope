@@ -223,3 +223,45 @@ def test_cache_meta_records_schema(tmp_path):
     assert meta["probe_count"] == 3
     assert meta["sample_count"] == 2
     assert "probe_id" in meta["annotation_columns"]
+
+
+class _Recorder:
+    def __init__(self):
+        self.fractions = []
+        self.infos = []
+
+    def stage(self, *args, **kwargs):
+        pass
+
+    def bytes(self, *args, **kwargs):
+        pass
+
+    def fraction(self, value, detail=None):
+        self.fractions.append(value)
+
+    def info(self, **fields):
+        self.infos.append(fields)
+
+
+def test_read_series_metadata_reports_progress(tmp_path):
+    soft = tmp_path / "GSE_TEST_family.soft.gz"
+    _write_soft(soft, GEOQUERY_SERIES)
+    recorder = _Recorder()
+
+    read_series_metadata(soft, "GSE_TEST", progress=recorder)
+
+    assert recorder.fractions[-1] == 1.0
+    assert any("title" in info for info in recorder.infos)
+
+
+def test_build_platform_cache_reports_sample_progress(tmp_path):
+    soft = tmp_path / "GSE_TEST_family.soft.gz"
+    _write_soft(soft, GEOQUERY_SERIES)
+    info = read_series_metadata(soft, "GSE_TEST")
+    recorder = _Recorder()
+
+    build_platform_cache(soft, "GPL1", info.sample_ids, info.phenotype, 0, tmp_path, progress=recorder)
+
+    assert recorder.fractions[-1] == 1.0
+    assert any(info.get("probe_count") == 3 for info in recorder.infos)
+

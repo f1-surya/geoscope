@@ -3,7 +3,7 @@ from __future__ import annotations
 import gzip
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
 from typing import Any, Iterable
@@ -179,15 +179,27 @@ class SeriesInfo:
     platforms: list[str]
     phenotype: pd.DataFrame
     supplementary_only: bool = False
+    summary: str = ""
+    overall_design: str = ""
+    experiment_type: str = ""
+    submission_date: str = ""
+    last_update_date: str = ""
+    pubmed_ids: list[str] = field(default_factory=list)
+    contributors: list[str] = field(default_factory=list)
+    organism: str = ""
+    relations: list[str] = field(default_factory=list)
 
 
 class _MetadataHandler(SoftHandler):
-    def __init__(self) -> None:
+    def __init__(self, progress: Any | None = None) -> None:
         self.series: dict[str, list[str]] = {}
         self.samples: dict[str, dict[str, list[str]]] = {}
         self.sample_order: list[str] = []
         self.platforms: list[str] = []
         self.had_sample_table = False
+        self.progress = progress
+        self.total_samples = 0
+        self.samples_done = 0
 
     def on_entry_start(self, entry_type: str, name: str) -> None:
         if entry_type == "SAMPLE" and name not in self.samples:
@@ -197,6 +209,24 @@ class _MetadataHandler(SoftHandler):
     def on_metadata(self, entry_type: str, name: str, key: str, value: str) -> None:
         if entry_type == "SERIES":
             self.series.setdefault(key, []).append(value)
+            if self.progress is None:
+                return
+            lowered = key.lower()
+            if lowered == "series_title":
+                self.progress.info(title=value)
+            elif lowered == "series_sample_id":
+                self.total_samples += 1
+                self.progress.info(sample_count=self.total_samples)
+            elif lowered == "series_platform_id":
+                self.progress.info(platforms=list(dict.fromkeys(self.series.get("Series_platform_id", []))))
+            elif lowered == "series_type":
+                self.progress.info(experiment_type=value)
+            elif lowered in ("series_sample_organism", "series_platform_organism"):
+                self.progress.info(organism=value)
+            elif lowered == "series_last_update_date":
+                self.progress.info(last_update_date=value)
+            elif lowered == "series_pubmed_id":
+                self.progress.info(pubmed_ids=list(dict.fromkeys(self.series.get("Series_pubmed_id", []))))
         elif entry_type == "SAMPLE":
             row = self.samples.setdefault(name, {})
             row.setdefault(_strip_metadata_prefix(key), []).append(value)
@@ -207,9 +237,15 @@ class _MetadataHandler(SoftHandler):
         if entry_type == "SAMPLE":
             self.had_sample_table = True
 
+    def on_entry_end(self, entry_type: str, name: str) -> None:
+        if entry_type == "SAMPLE" and self.progress is not None:
+            self.samples_done += 1
+            if self.total_samples:
+                self.progress.fraction(self.samples_done / self.total_samples, f"{self.samples_done}/{self.total_samples} samples")
 
-def read_series_metadata(path: Path, accession: str | None = None) -> SeriesInfo:
-    handler = _MetadataHandler()
+
+def read_series_metadata(path: Path, accession: str | None = None, progress: Any | None = None) -> SeriesInfo:
+    handler = _MetadataHandler(progress=progress)
     scan_soft(path, handler)
 
     if not accession:
@@ -236,6 +272,13 @@ def read_series_metadata(path: Path, accession: str | None = None) -> SeriesInfo
     phenotype.index.name = "sample"
     phenotype = phenotype.reset_index()
 
+    def first(key: str) -> str:
+        values = handler.series.get(key) or []
+        return values[0] if values else ""
+
+    def unique(key: str) -> list[str]:
+        return list(dict.fromkeys(handler.series.get(key, [])))
+
     return SeriesInfo(
         accession=accession,
         title=title,
@@ -243,6 +286,15 @@ def read_series_metadata(path: Path, accession: str | None = None) -> SeriesInfo
         platforms=platforms,
         phenotype=phenotype,
         supplementary_only=not handler.had_sample_table,
+        summary=first("Series_summary"),
+        overall_design=first("Series_overall_design"),
+        experiment_type=first("Series_type"),
+        submission_date=first("Series_submission_date"),
+        last_update_date=first("Series_last_update_date"),
+        pubmed_ids=unique("Series_pubmed_id"),
+        contributors=unique("Series_contributor"),
+        organism=first("Series_sample_organism") or first("Series_platform_organism"),
+        relations=unique("Series_relation"),
     )
 
 
@@ -263,6 +315,7 @@ class _PlatformBuilder(SoftHandler):
         annotation_path: Path,
         value_column: str | None = None,
         ram_budget: int = DEFAULT_RAM_BUDGET,
+        progress: Any | None = None,
     ) -> None:
         self.platform_id = platform_id
         self.sample_ids = list(sample_ids)
@@ -270,6 +323,8 @@ class _PlatformBuilder(SoftHandler):
         self.annotation_path = annotation_path
         self.value_column = value_column
         self.ram_budget = ram_budget
+        self.progress = progress
+        self.samples_done = 0
 
         self.found_platform = False
         self.annotation_columns: list[str] = []
@@ -313,8 +368,14 @@ class _PlatformBuilder(SoftHandler):
     def on_entry_end(self, entry_type: str, name: str) -> None:
         if entry_type == "PLATFORM" and name == self.platform_id and self.found_platform:
             self._finish_annotation()
-        elif entry_type == "SAMPLE" and self._current_sample is not None:
-            self._finish_sample()
+        elif entry_type == "SAMPLE":
+            if self._current_sample is not None:
+                self._finish_sample()
+                if self.progress is not None and self.probe_index is not None:
+                    self.samples_done += 1
+                    total = len(self.sample_ids)
+                    if total:
+                        self.progress.fraction(self.samples_done / total, f"{self.samples_done}/{total} samples")
             self._current_sample = None
             self._sample_lines = []
 
@@ -463,10 +524,11 @@ def build_platform_cache(
     dataset_path: Path,
     value_column: str | None = None,
     gpl_soft_path: Path | None = None,
+    progress: Any | None = None,
 ) -> dict[str, Any]:
     """Stream one platform of a series into bounded, reusable Parquet caches."""
     paths = platform_cache_paths(dataset_path, platform_index)
-    builder = _PlatformBuilder(platform_id, sample_ids, paths["annotation"], value_column=value_column)
+    builder = _PlatformBuilder(platform_id, sample_ids, paths["annotation"], value_column=value_column, progress=progress)
     scan_soft(series_path, builder)
 
     if not builder.found_platform:
@@ -484,6 +546,7 @@ def build_platform_cache(
         builder.probe_index = pd.Index(builder.probe_ids)
         builder.matrix = np.full((len(builder.probe_ids), len(builder.sample_ids)), np.nan, dtype=np.float32)
         builder.layout = "wide"
+        builder.samples_done = 0
         scan_soft(series_path, builder)
 
     if not builder.found_platform:
@@ -508,4 +571,6 @@ def build_platform_cache(
         "rows": len(builder.probe_ids) * len(sample_ids),
     }
     paths["meta"].write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    if progress is not None:
+        progress.info(platforms=[platform_id], sample_count=len(sample_ids), probe_count=len(builder.probe_ids))
     return meta

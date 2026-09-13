@@ -1,4 +1,11 @@
-from .acquisition import load_dataset, load_platform, validate_accession
+from .acquisition import (
+    dataset_info,
+    fetch_series_summary,
+    load_dataset,
+    load_dataset_info,
+    load_platform,
+    validate_accession,
+)
 from .parsing import (
     annotation_columns,
     assemble_long,
@@ -10,7 +17,10 @@ from .parsing import (
 )
 
 __all__ = [
+    "dataset_info",
+    "fetch_series_summary",
     "load_dataset",
+    "load_dataset_info",
     "load_platform",
     "validate_accession",
     "annotation_columns",

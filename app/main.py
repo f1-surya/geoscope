@@ -15,10 +15,11 @@ from pydantic import BaseModel, Field
 
 from .analysis import analyze
 from .export import export_report, export_table
-from .geo.acquisition import load_dataset, load_platform, validate_accession
+from .geo.acquisition import load_dataset, load_dataset_info, load_platform, validate_accession
 from .geo.parsing import assemble_long, build_mapping, clean_gene_values, detect_assignment_column
 from .geo.soft import platform_cache_paths
 from .plotting import PALETTES, create_plot
+from .progress import progress_tracker
 from .storage import Store
 
 BASE = Path(__file__).parent
@@ -75,28 +76,63 @@ def palettes():
     return PALETTES
 
 
+@app.get("/api/datasets/{accession}/info")
+def dataset_info(accession: str):
+    try:
+        accession = validate_accession(accession)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return load_dataset_info(accession, store)
+
+
+@app.get("/api/datasets/progress/{accession}")
+def dataset_progress(accession: str):
+    try:
+        key = validate_accession(accession)
+    except ValueError:
+        key = accession.strip().upper()
+    snapshot = progress_tracker.snapshot(key)
+    return snapshot if snapshot else {"active": False, "done": True}
+
+
 @app.post("/api/datasets/load")
 def dataset_load(payload: dict):
     try:
-        return load_dataset(payload.get("accession", ""), store)
+        accession = validate_accession(payload.get("accession", ""))
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    reporter = progress_tracker.reporter(accession, accession)
+    try:
+        result = load_dataset(accession, store, progress=reporter)
+    except (ValueError, RuntimeError) as exc:
+        reporter.fail(str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        reporter.fail(str(exc))
+        raise
+    reporter.succeed()
+    return result
 
 
 @app.get("/api/datasets/{accession}/platforms/{platform_index}")
 def dataset_platform(accession: str, platform_index: int, assignment_column: str | None = None, value_column: str | None = None):
     try:
         accession = validate_accession(accession)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    reporter = progress_tracker.reporter(accession, accession)
+    try:
         row = store.dataset(accession)
         if not row:
             raise ValueError("Load the dataset before selecting a platform.")
         dataset_path = Path(row["path"])
-        meta = load_platform(dataset_path, platform_index, store.paths["raw"], value_column)
+        meta = load_platform(dataset_path, platform_index, store.paths["raw"], value_column, progress=reporter)
         paths = platform_cache_paths(dataset_path, platform_index)
         available_columns = [column for column in meta.get("annotation_columns", []) if column != "probe_id"]
         selected_column = assignment_column or detect_assignment_column(available_columns)
         if selected_column is None or selected_column not in available_columns:
             if assignment_column is None:
+                reporter.succeed()
                 return {
                     "requires_annotation_column": True,
                     "annotation_columns": available_columns,
@@ -110,6 +146,7 @@ def dataset_platform(accession: str, platform_index: int, assignment_column: str
         phenotype_columns = [column for column in phenotype.columns if column not in ("sample", "geo_accession")]
         phenotype_records = json.loads(phenotype[["sample", *phenotype_columns]].to_json(orient="records"))
         genes = sorted(mapped["gene_symbol"].dropna().unique().tolist())
+        reporter.succeed()
         return {
             "assignment_column": selected_column,
             "annotation_columns": available_columns,
@@ -122,6 +159,7 @@ def dataset_platform(accession: str, platform_index: int, assignment_column: str
             "value_columns": meta.get("value_columns", []),
         }
     except Exception as exc:
+        reporter.fail(str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -129,6 +167,11 @@ def dataset_platform(accession: str, platform_index: int, assignment_column: str
 def create_analysis(request: AnalysisRequest):
     try:
         accession = validate_accession(request.accession)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    reporter = progress_tracker.reporter(accession, accession)
+    try:
+        reporter.stage("prepare", "Loading selected expression data")
         row = store.dataset(accession)
         if not row:
             raise ValueError("Load the dataset before starting an analysis.")
@@ -146,7 +189,8 @@ def create_analysis(request: AnalysisRequest):
         phenotype = pd.read_parquet(paths["phenotype"])
         data = assemble_long(expression, mapped, phenotype, meta.get("layout", "wide"))
         data = clean_gene_values(data, request.genes)
-        result = analyze(data, request.genes, request.group_column, request.selected_samples or None)
+        reporter.stage("analysis", "Running statistical tests")
+        result = analyze(data, request.genes, request.group_column, request.selected_samples or None, progress=reporter)
         analysis_id = uuid.uuid4().hex
         result_dir = store.paths["analyses"] / analysis_id
         result_dir.mkdir(parents=True, exist_ok=True)
@@ -156,11 +200,14 @@ def create_analysis(request: AnalysisRequest):
         palette = request.colors or PALETTES.get(request.palette, PALETTES["Scientific"])
         groups = list(data[request.group_column].astype(str).dropna().unique())
         plot_path = result_dir / "plot.png"
+        reporter.stage("plot", "Rendering chart")
         create_plot(result["data"], request.group_column, palette, plot_path, f"{accession} | {', '.join(request.genes)}", groups)
         config = request.model_dump() | {"method": result["method"], "plot": str(plot_path), "groups": groups, "colors": palette}
         store.save_analysis(analysis_id, accession, config, result_dir)
+        reporter.succeed()
         return {"id": analysis_id, "method": result["method"], "results": result_json["results"], "pairwise": result_json["pairwise"], "plot": f"/api/analyses/{analysis_id}/plot"}
     except Exception as exc:
+        reporter.fail(str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
