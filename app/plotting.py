@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
-os.environ.setdefault("MPL_IGNORE_SYSTEM_FONTS", "1")
+if sys.platform != "win32":
+    # Avoid matplotlib shelling out to fc-list / system_profiler, which inherit
+    # PyInstaller's bundle library path and fail on other distributions. Windows
+    # has no such subprocess, so keep native font discovery there.
+    os.environ.setdefault("MPL_IGNORE_SYSTEM_FONTS", "1")
 
 import matplotlib
 

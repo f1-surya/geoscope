@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from itertools import combinations
 from typing import Any
 
@@ -7,6 +8,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import kruskal, mannwhitneyu
 from statsmodels.stats.multitest import multipletests
+
+logger = logging.getLogger("geoscope.analysis")
 
 
 def _groups(data: pd.DataFrame, group_column: str, selected_samples: list[str] | None) -> pd.DataFrame:
@@ -52,6 +55,7 @@ def analyze(
     results = []
     pairwise = []
     grouped = list(filtered.groupby("gene_symbol", sort=True))
+    logger.debug("Analyzing %d genes across groups of %s", len(grouped), group_column)
     for index, (gene, gene_data) in enumerate(grouped, start=1):
         method, omnibus, comparisons = _test(gene_data, group_column)
         summary = gene_data.groupby(group_column)["value"].agg(["count", "mean", "median", "std"]).reset_index().rename(columns={group_column: "group"})

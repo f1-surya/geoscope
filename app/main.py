@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -9,10 +10,25 @@ import threading
 import uuid
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlparse
+
+# PyInstaller windowed builds (Windows, and macOS .app) leave sys.stdout and
+# sys.stderr as None. uvicorn and other libraries call sys.stdout.isatty(), so
+# give the streams a real target before importing anything that might use them.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+from .logging_config import configure_logging
+from .paths import ensure_data_dirs
+
+LOG_PATH = configure_logging(ensure_data_dirs()["logs"])
+logger = logging.getLogger("geoscope")
 
 import pandas as pd
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -26,6 +42,7 @@ from .progress import progress_tracker
 from .storage import Store
 
 BASE = Path(__file__).parent
+STATIC_DIR = (BASE / "static").resolve()
 store = Store()
 app = FastAPI(title="GEOscope", version="0.1.0")
 
@@ -61,12 +78,29 @@ def analysis_page(analysis_id: str):
 
 @app.get("/static/{filename}")
 def static_file(filename: str):
-    return FileResponse(BASE / "static" / filename)
+    candidate = (STATIC_DIR / filename).resolve()
+    if candidate != STATIC_DIR and STATIC_DIR not in candidate.parents:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(candidate)
 
 
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/api/shutdown")
+def shutdown(request: Request):
+    origin = request.headers.get("origin")
+    if origin and urlparse(origin).hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise HTTPException(status_code=403, detail="Shutdown is only available locally")
+    server = getattr(app.state, "server", None)
+    logger.info("Shutdown requested")
+    if server is not None:
+        server.should_exit = True
+    return {"status": "stopping"}
 
 
 @app.get("/api/history")
@@ -105,12 +139,15 @@ def dataset_load(payload: dict):
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     reporter = progress_tracker.reporter(accession, accession)
+    logger.info("Loading dataset %s", accession)
     try:
         result = load_dataset(accession, store, progress=reporter)
     except (ValueError, RuntimeError) as exc:
+        logger.warning("Could not load dataset %s: %s", accession, exc)
         reporter.fail(str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("Unexpected error loading dataset %s", accession)
         reporter.fail(str(exc))
         raise
     reporter.succeed()
@@ -124,6 +161,7 @@ def dataset_platform(accession: str, platform_index: int, assignment_column: str
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     reporter = progress_tracker.reporter(accession, accession)
+    logger.info("Preparing platform %s for %s", platform_index, accession)
     try:
         row = store.dataset(accession)
         if not row:
@@ -162,6 +200,7 @@ def dataset_platform(accession: str, platform_index: int, assignment_column: str
             "value_columns": meta.get("value_columns", []),
         }
     except Exception as exc:
+        logger.exception("Could not prepare platform %s for %s", platform_index, accession)
         reporter.fail(str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -173,6 +212,13 @@ def create_analysis(request: AnalysisRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     reporter = progress_tracker.reporter(accession, accession)
+    logger.info(
+        "Starting analysis for %s: genes=%s group=%s samples=%s",
+        accession,
+        request.genes,
+        request.group_column,
+        len(request.selected_samples),
+    )
     try:
         reporter.stage("prepare", "Loading selected expression data")
         row = store.dataset(accession)
@@ -208,8 +254,10 @@ def create_analysis(request: AnalysisRequest):
         config = request.model_dump() | {"method": result["method"], "plot": str(plot_path), "groups": groups, "colors": palette}
         store.save_analysis(analysis_id, accession, config, result_dir)
         reporter.succeed()
+        logger.info("Completed analysis %s for %s using %s", analysis_id, accession, result["method"])
         return {"id": analysis_id, "method": result["method"], "results": result_json["results"], "pairwise": result_json["pairwise"], "plot": f"/api/analyses/{analysis_id}/plot"}
     except Exception as exc:
+        logger.exception("Analysis failed for %s", accession)
         reporter.fail(str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -268,22 +316,28 @@ def analysis_export(analysis_id: str, format_name: str):
     if not row:
         raise HTTPException(status_code=404, detail="Analysis not found")
     result_dir = Path(row["result_path"])
-    data = pd.read_parquet(result_dir / "observations.parquet")
-    if format_name in {"csv", "tsv", "xlsx"}:
-        target = result_dir / f"results.{format_name}"
-        export_table(data, target, format_name)
-    elif format_name == "pdf":
-        target = result_dir / "report.pdf"
-        export_report(target, json.loads(row["config"]), data, result_dir / "plot.png")
-    elif format_name in {"png", "svg"}:
-        target = result_dir / f"plot.{format_name}"
-        if format_name == "png":
-            target.write_bytes((result_dir / "plot.png").read_bytes())
+    try:
+        data = pd.read_parquet(result_dir / "observations.parquet")
+        if format_name in {"csv", "tsv", "xlsx"}:
+            target = result_dir / f"results.{format_name}"
+            export_table(data, target, format_name)
+        elif format_name == "pdf":
+            target = result_dir / "report.pdf"
+            export_report(target, json.loads(row["config"]), data, result_dir / "plot.png")
+        elif format_name in {"png", "svg"}:
+            target = result_dir / f"plot.{format_name}"
+            if format_name == "png":
+                target.write_bytes((result_dir / "plot.png").read_bytes())
+            else:
+                config = json.loads(row["config"])
+                create_plot(data, config["group_column"], config.get("colors") or PALETTES[config.get("palette", "Scientific")], target, config["accession"])
         else:
-            config = json.loads(row["config"])
-            create_plot(data, config["group_column"], config.get("colors") or PALETTES[config.get("palette", "Scientific")], target, config["accession"])
-    else:
-        raise HTTPException(status_code=400, detail="Unsupported export format")
+            raise HTTPException(status_code=400, detail="Unsupported export format")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Export %s failed for analysis %s", format_name, analysis_id)
+        raise HTTPException(status_code=400, detail=f"Export failed: {exc}") from exc
     return FileResponse(target, filename=target.name)
 
 
@@ -298,13 +352,30 @@ def _clean_subprocess_env() -> dict[str, str]:
     return env
 
 
+def _notify(message: str) -> None:
+    """Show a message box on Windows, where a windowed build has no console."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, message, "GEOscope", 0x40)
+    except Exception:
+        logger.debug("Could not display message box", exc_info=True)
+
+
 def _open_browser(url: str) -> bool:
     if sys.platform == "win32":
         try:
             os.startfile(url)
+            logger.info("Opened browser via os.startfile")
             return True
         except OSError:
-            return webbrowser.open(url)
+            logger.warning("os.startfile failed for %s", url, exc_info=True)
+            if webbrowser.open(url):
+                return True
+            _notify(f"GEOscope is running, but the browser did not open automatically.\n\nOpen {url} manually.")
+            return False
     command = ["open", url] if sys.platform == "darwin" else ["xdg-open", url]
     if shutil.which(command[0]):
         try:
@@ -315,9 +386,10 @@ def _open_browser(url: str) -> bool:
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
+            logger.info("Opened browser via %s", command[0])
             return True
         except OSError:
-            pass
+            logger.warning("Could not launch %s", command[0], exc_info=True)
     return webbrowser.open(url)
 
 
@@ -326,6 +398,7 @@ def _announce(url: str) -> None:
     print(f"GEOscope {app.version}")
     print(f"  Web UI   {url}")
     print(f"  Data dir {store.paths['root']}")
+    print(f"  Log file {LOG_PATH}")
     print("  Stop     Press Ctrl+C")
     print()
 
@@ -333,10 +406,24 @@ def _announce(url: str) -> None:
 def run() -> None:
     import signal
 
-    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", timeout_graceful_shutdown=5)
+    logger.info(
+        "GEOscope %s starting (frozen=%s, python=%s, platform=%s)",
+        app.version,
+        getattr(sys, "frozen", False),
+        sys.version.split()[0],
+        sys.platform,
+    )
+    logger.info("Data directory: %s", store.paths["root"])
+    logger.info("Log file: %s", LOG_PATH)
+
+    # log_config=None keeps uvicorn from installing its own stderr-only handlers
+    # (and from calling sys.stdout.isatty()), so all logs reach our file handler.
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_config=None, timeout_graceful_shutdown=5)
     server = uvicorn.Server(config)
+    app.state.server = server
 
     def request_shutdown(signum, frame):
+        logger.info("Received signal %s, shutting down", signum)
         server.should_exit = True
 
     previous_handlers: list[tuple[int, object]] = []
@@ -357,22 +444,26 @@ def run() -> None:
         thread.join(timeout=0.05)
 
     if not server.started:
+        logger.error("GEOscope failed to start; see the log file for details")
         print("GEOscope failed to start.", file=sys.stderr)
+        _notify(f"GEOscope failed to start.\n\nSee the log for details:\n{LOG_PATH}")
         return
 
     port = server.servers[0].sockets[0].getsockname()[1]
     url = f"http://127.0.0.1:{port}"
+    logger.info("Serving at %s", url)
     _announce(url)
 
     try:
         _open_browser(url)
     except Exception:
-        pass
+        logger.exception("Unexpected error opening the browser")
 
     try:
         while thread.is_alive():
             thread.join(timeout=0.2)
     except KeyboardInterrupt:
+        logger.info("Interrupted, shutting down")
         server.should_exit = True
     finally:
         server.should_exit = True
@@ -382,6 +473,7 @@ def run() -> None:
                 signal.signal(signum, handler)
             except (ValueError, OSError):
                 pass
+        logger.info("GEOscope stopped")
         print("GEOscope stopped.")
 
 

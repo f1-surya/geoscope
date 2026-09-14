@@ -7,6 +7,9 @@ from pathlib import Path
 
 def application_data_dir() -> Path:
     """Return a writable per-user data directory on all supported systems."""
+    override = os.environ.get("GEOSCOPE_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
     if sys.platform == "win32":
         root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     elif sys.platform == "darwin":

@@ -1,5 +1,6 @@
 import gzip
 import json
+import ssl
 
 import pytest
 
@@ -121,6 +122,16 @@ def test_network_calls_use_shared_ssl_context(monkeypatch):
 
 def test_ssl_context_loads_trusted_roots():
     assert acquisition._SSL_CONTEXT.cert_store_stats()["x509_ca"] > 0
+
+
+def test_build_ssl_context_survives_certifi_failure(monkeypatch):
+    monkeypatch.setattr(acquisition.certifi, "where", lambda: "/nonexistent/cacert.pem")
+
+    context = acquisition._build_ssl_context()
+
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
 
 
 def test_dataset_info_prefers_local_fields_and_keeps_geo_fields():

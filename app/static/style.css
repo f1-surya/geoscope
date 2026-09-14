@@ -468,3 +468,20 @@ img { max-width: 100%; }
   .color-row { flex-wrap: wrap; }
   .color-row label { min-width: 100%; }
 }
+
+/* ---------- App footer ---------- */
+.app-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+.app-footer button {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+.app-footer button:hover { background: var(--surface-3); border-color: var(--border); color: var(--text); }
+#quit-status { color: var(--text-muted); font-size: 0.85rem; }

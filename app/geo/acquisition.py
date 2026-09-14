@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import ssl
@@ -19,6 +20,8 @@ from .soft import (
     platform_cache_paths,
     read_series_metadata,
 )
+
+logger = logging.getLogger("geoscope.geo")
 
 
 def validate_accession(accession: str) -> str:
@@ -47,7 +50,15 @@ def _build_ssl_context() -> ssl.SSLContext:
     while guaranteeing a usable trust store on Linux, macOS, and Windows.
     """
     context = ssl.create_default_context()
-    context.load_verify_locations(cafile=certifi.where())
+    try:
+        context.load_verify_locations(cafile=certifi.where())
+    except (OSError, ssl.SSLError):
+        logger.warning("Could not load bundled certifi roots; relying on the OS trust store", exc_info=True)
+    try:
+        roots = context.cert_store_stats().get("x509_ca", 0)
+    except Exception:
+        roots = "unknown"
+    logger.info("SSL context ready with %s trusted CA certificates", roots)
     return context
 
 
@@ -57,9 +68,11 @@ _SSL_CONTEXT = _build_ssl_context()
 def _download_file(url: str, target: Path, progress: Any | None = None) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and target.stat().st_size > 0:
+        logger.debug("Using cached download %s", target)
         return target
     partial = target.with_suffix(target.suffix + ".part")
     last_error: Exception | None = None
+    logger.info("Downloading %s", url)
     for attempt in range(3):
         try:
             if partial.exists():
@@ -82,10 +95,13 @@ def _download_file(url: str, target: Path, progress: Any | None = None) -> Path:
             if partial.stat().st_size == 0:
                 raise RuntimeError("NCBI returned an empty GEO file")
             partial.replace(target)
+            logger.info("Downloaded %s (%d bytes)", target.name, target.stat().st_size)
             return target
         except Exception as exc:
             last_error = exc
+            logger.warning("Download attempt %d/3 failed for %s: %s", attempt + 1, url, exc)
             time.sleep(2**attempt)
+    logger.error("Giving up downloading %s", url)
     raise RuntimeError(f"HTTPS download failed for {url}: {last_error}") from last_error
 
 
@@ -264,6 +280,7 @@ def load_dataset(accession: str, store: Store, progress: Any | None = None) -> d
     if existing:
         path = Path(existing["path"])
         if path.exists() and (path / "phenotype.parquet").exists():
+            logger.info("Using cached dataset %s at %s", accession, path)
             metadata = json.loads(existing["metadata"])
             _ensure_geo_summary(accession, metadata, path, store)
             if progress is not None:
@@ -337,6 +354,12 @@ def load_dataset(accession: str, store: Store, progress: Any | None = None) -> d
     }
     (dataset_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     store.save_dataset(accession, dataset_dir, metadata)
+    logger.info(
+        "Saved dataset %s: %d samples, platforms=%s",
+        accession,
+        len(info.sample_ids),
+        [platform["id"] for platform in platforms],
+    )
     return {**metadata, "path": str(dataset_dir), "info": dataset_info(metadata)}
 
 
@@ -377,8 +400,10 @@ def load_platform(
         and (value_column is None or cached_meta.get("value_column") == value_column)
     )
     if up_to_date:
+        logger.debug("Using cached platform %s for %s", platform_id, dataset_path.name)
         return cached_meta
 
+    logger.info("Building platform cache for %s (%s), %d samples", platform_id, dataset_path.name, len(sample_ids))
     if progress is not None:
         progress.stage("platform", f"Parsing platform {platform_id}")
     try:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from io import StringIO
@@ -12,6 +13,8 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+logger = logging.getLogger("geoscope.geo.soft")
 
 ENTRY_RE = re.compile(r"^\^(\w+)\s*=\s*(.*?)\s*$")
 META_PREFIX_RE = re.compile(r"^[A-Za-z]*?_")
@@ -430,6 +433,25 @@ class _PlatformBuilder(SoftHandler):
         else:
             self.matrix = np.full((len(self.probe_ids), len(self.sample_ids)), np.nan, dtype=np.float32)
 
+    def close(self) -> None:
+        """Release the annotation writer even when a scan aborts mid-way.
+
+        Leaving the handle open can block a later rebuild with a file-lock
+        error on Windows, so this is called from a ``finally`` in the builder.
+        """
+        if self._annotation_writer is None:
+            return
+        try:
+            self._flush_annotation()
+        except Exception:
+            logger.warning("Could not flush annotation cache on close", exc_info=True)
+        finally:
+            try:
+                self._annotation_writer.close()
+            except Exception:
+                logger.warning("Could not close annotation writer", exc_info=True)
+            self._annotation_writer = None
+
     # -- sample tables ------------------------------------------------------
     def _finish_sample(self) -> None:
         if self._current_sample is None or not self._sample_lines or self.probe_index is None:
@@ -529,48 +551,61 @@ def build_platform_cache(
     """Stream one platform of a series into bounded, reusable Parquet caches."""
     paths = platform_cache_paths(dataset_path, platform_index)
     builder = _PlatformBuilder(platform_id, sample_ids, paths["annotation"], value_column=value_column, progress=progress)
-    scan_soft(series_path, builder)
-
-    if not builder.found_platform:
-        if not sample_ids:
-            raise ValueError("This series does not contain per-sample expression tables.")
-        if gpl_soft_path is None:
-            raise ValueError(f"Series does not embed annotation for platform {platform_id}.")
-        annotation_builder = _PlatformBuilder(platform_id, [], paths["annotation"], value_column=value_column)
-        scan_soft(gpl_soft_path, annotation_builder)
-        if not annotation_builder.found_platform:
-            raise ValueError(f"Could not find annotation for platform {platform_id}.")
-        builder.found_platform = True
-        builder.annotation_columns = annotation_builder.annotation_columns
-        builder.probe_ids = annotation_builder.probe_ids
-        builder.probe_index = pd.Index(builder.probe_ids)
-        builder.matrix = np.full((len(builder.probe_ids), len(builder.sample_ids)), np.nan, dtype=np.float32)
-        builder.layout = "wide"
-        builder.samples_done = 0
+    try:
         scan_soft(series_path, builder)
 
-    if not builder.found_platform:
-        raise ValueError("This series does not contain per-sample expression tables.")
+        if not builder.found_platform:
+            if not sample_ids:
+                raise ValueError("This series does not contain per-sample expression tables.")
+            if gpl_soft_path is None:
+                raise ValueError(f"Series does not embed annotation for platform {platform_id}.")
+            annotation_builder = _PlatformBuilder(platform_id, [], paths["annotation"], value_column=value_column)
+            try:
+                scan_soft(gpl_soft_path, annotation_builder)
+            finally:
+                annotation_builder.close()
+            if not annotation_builder.found_platform:
+                raise ValueError(f"Could not find annotation for platform {platform_id}.")
+            builder.found_platform = True
+            builder.annotation_columns = annotation_builder.annotation_columns
+            builder.probe_ids = annotation_builder.probe_ids
+            builder.probe_index = pd.Index(builder.probe_ids)
+            builder.matrix = np.full((len(builder.probe_ids), len(builder.sample_ids)), np.nan, dtype=np.float32)
+            builder.layout = "wide"
+            builder.samples_done = 0
+            scan_soft(series_path, builder)
 
-    builder.write_expression(paths["expression"])
+        if not builder.found_platform:
+            raise ValueError("This series does not contain per-sample expression tables.")
 
-    subset = phenotype
-    if "sample" in phenotype.columns:
-        subset = phenotype[phenotype["sample"].isin(set(sample_ids))]
-    subset.to_parquet(paths["phenotype"], index=False)
+        builder.write_expression(paths["expression"])
 
-    meta = {
-        "platform_id": platform_id,
-        "platform_index": platform_index,
-        "value_column": builder.resolved_value_column or value_column or "value",
-        "value_columns": builder.value_columns,
-        "annotation_columns": builder.annotation_columns,
-        "layout": builder.layout,
-        "probe_count": len(builder.probe_ids),
-        "sample_count": len(sample_ids),
-        "rows": len(builder.probe_ids) * len(sample_ids),
-    }
-    paths["meta"].write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        subset = phenotype
+        if "sample" in phenotype.columns:
+            subset = phenotype[phenotype["sample"].isin(set(sample_ids))]
+        subset.to_parquet(paths["phenotype"], index=False)
+
+        meta = {
+            "platform_id": platform_id,
+            "platform_index": platform_index,
+            "value_column": builder.resolved_value_column or value_column or "value",
+            "value_columns": builder.value_columns,
+            "annotation_columns": builder.annotation_columns,
+            "layout": builder.layout,
+            "probe_count": len(builder.probe_ids),
+            "sample_count": len(sample_ids),
+            "rows": len(builder.probe_ids) * len(sample_ids),
+        }
+        paths["meta"].write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        logger.debug(
+            "Platform %s built with %d probes, %d samples, layout=%s",
+            platform_id,
+            len(builder.probe_ids),
+            len(sample_ids),
+            builder.layout,
+        )
+    finally:
+        builder.close()
     if progress is not None:
         progress.info(platforms=[platform_id], sample_count=len(sample_ids), probe_count=len(builder.probe_ids))
     return meta

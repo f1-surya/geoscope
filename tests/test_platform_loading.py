@@ -2,7 +2,9 @@ import gzip
 import json
 
 import pandas as pd
+import pytest
 
+from app.geo import soft
 from app.geo.soft import build_platform_cache, platform_cache_paths, read_series_metadata
 
 
@@ -264,4 +266,25 @@ def test_build_platform_cache_reports_sample_progress(tmp_path):
 
     assert recorder.fractions[-1] == 1.0
     assert any(info.get("probe_count") == 3 for info in recorder.infos)
+
+
+def test_build_platform_cache_closes_writer_when_scan_fails(tmp_path, monkeypatch):
+    soft_file = tmp_path / "GSE_TEST_family.soft.gz"
+    _write_soft(soft_file, GEOQUERY_SERIES)
+    info = read_series_metadata(soft_file, "GSE_TEST")
+
+    def failing_scan(path, handler):
+        handler.on_entry_start("PLATFORM", "GPL1")
+        handler.on_table_header("PLATFORM", "GPL1", ["ID", "gene_assignment"])
+        handler.on_table_line("PLATFORM", "GPL1", "p1\tx // CD5")
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(soft, "scan_soft", failing_scan)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        build_platform_cache(soft_file, "GPL1", info.sample_ids, info.phenotype, 0, tmp_path)
+
+    # The annotation writer must have been flushed and closed despite the abort.
+    table = pd.read_parquet(tmp_path / "platform-0-annotation.parquet")
+    assert len(table) == 1
 
