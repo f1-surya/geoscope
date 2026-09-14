@@ -51,9 +51,11 @@ ESUMMARY = {
 
 def _install_fake_urlopen(monkeypatch, responses):
     calls = []
+    contexts = []
 
-    def fake_urlopen(request, timeout=None):
+    def fake_urlopen(request, timeout=None, context=None):
         calls.append(request.full_url)
+        contexts.append(context)
         handler = responses(len(calls), request.full_url)
         if isinstance(handler, Exception):
             raise handler
@@ -61,7 +63,7 @@ def _install_fake_urlopen(monkeypatch, responses):
 
     monkeypatch.setattr(acquisition.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(acquisition.time, "sleep", lambda *_: None)
-    return calls
+    return calls, contexts
 
 
 def test_fetch_series_summary_normalizes_esummary(monkeypatch):
@@ -106,6 +108,19 @@ def test_fetch_series_summary_raises_after_retries(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Could not fetch GEO metadata"):
         fetch_series_summary("GSE150368")
+
+
+def test_network_calls_use_shared_ssl_context(monkeypatch):
+    _, contexts = _install_fake_urlopen(monkeypatch, lambda *_: ESUMMARY)
+
+    fetch_series_summary("GSE150368")
+
+    assert contexts
+    assert all(context is acquisition._SSL_CONTEXT for context in contexts)
+
+
+def test_ssl_context_loads_trusted_roots():
+    assert acquisition._SSL_CONTEXT.cert_store_stats()["x509_ca"] > 0
 
 
 def test_dataset_info_prefers_local_fields_and_keeps_geo_fields():

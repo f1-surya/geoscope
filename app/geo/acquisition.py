@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
 
+import certifi
 import pandas as pd
 
 from ..storage import Store
@@ -36,6 +38,22 @@ def _platform_soft_url(platform_id: str) -> str:
     return f"https://ftp.ncbi.nlm.nih.gov/geo/platforms/{range_subdir}/{platform_id}/soft/{platform_id}_family.soft.gz"
 
 
+def _build_ssl_context() -> ssl.SSLContext:
+    """Trust the OS certificate store plus certifi's public roots.
+
+    Frozen builds bundle their own OpenSSL, whose compiled-in CA paths come
+    from the build machine and are often absent at runtime. Layering certifi
+    on top of the default context keeps platform/enterprise roots working
+    while guaranteeing a usable trust store on Linux, macOS, and Windows.
+    """
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    return context
+
+
+_SSL_CONTEXT = _build_ssl_context()
+
+
 def _download_file(url: str, target: Path, progress: Any | None = None) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and target.stat().st_size > 0:
@@ -47,7 +65,7 @@ def _download_file(url: str, target: Path, progress: Any | None = None) -> Path:
             if partial.exists():
                 partial.unlink()
             request = urllib.request.Request(url, headers={"User-Agent": "GEOscope/0.1"})
-            with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as output:
+            with urllib.request.urlopen(request, timeout=120, context=_SSL_CONTEXT) as response, partial.open("wb") as output:
                 length = response.headers.get("Content-Length")
                 total = int(length) if length and length.isdigit() else None
                 downloaded = 0
@@ -83,7 +101,7 @@ def _eutils_json(endpoint: str, params: dict[str, str]) -> dict[str, Any]:
         query["email"] = email
     url = f"{EUTILS_BASE}/{endpoint}?{urllib.parse.urlencode(query)}"
     request = urllib.request.Request(url, headers={"User-Agent": "GEOscope/0.1"})
-    with urllib.request.urlopen(request, timeout=EUTILS_TIMEOUT) as response:
+    with urllib.request.urlopen(request, timeout=EUTILS_TIMEOUT, context=_SSL_CONTEXT) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
