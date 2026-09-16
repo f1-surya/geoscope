@@ -2,8 +2,17 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="dark light">
   <title>New analysis | GEOscope</title>
+  <script>
+    (function () {
+      try {
+        var stored = localStorage.getItem('geoscope-theme');
+        var theme = stored || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.setAttribute('data-theme', theme);
+      } catch (_) {}
+    })();
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;550;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -13,18 +22,17 @@
 <main>
   <header class="page-header">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M7 3c0 6 10 6 10 12M17 3c0 6-10 6-10 12"/>
-          <path d="M8.5 6h7M8.5 10h7M8.5 14h7M8.5 18h7"/>
-        </svg>
-      </span>
       <div>
         <h1>GEOscope</h1>
         <p>New analysis</p>
       </div>
     </div>
-    <a class="back-link" href="/">Home</a>
+    <div class="header-actions">
+      <a href="/">Home</a>
+      <a href="/storage">Datasets</a>
+      <a href="#" id="quit">Quit</a>
+      <span id="quit-status" role="status" aria-live="polite"></span>
+    </div>
   </header>
 
   <section class="load" id="load-section">
@@ -110,6 +118,7 @@
   </section>
   </div>
 </main>
+<script src="/static/header.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

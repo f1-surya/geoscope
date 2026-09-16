@@ -46,3 +46,24 @@ def test_static_path_traversal_is_blocked():
 def test_static_files_are_served():
     response = TestClient(app).get("/static/home.js")
     assert response.status_code == 200
+
+
+def test_storage_page_is_served():
+    response = TestClient(app).get("/storage")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+
+
+def test_home_header_links_to_storage_and_has_quit():
+    body = TestClient(app).get("/").text
+    assert 'href="/storage"' in body
+    assert 'id="quit"' in body
+    assert "<footer" not in body
+
+
+def test_quit_link_and_header_script_on_every_page():
+    client = TestClient(app)
+    for path in ("/", "/storage", "/analysis/new"):
+        body = client.get(path).text
+        assert 'id="quit"' in body, path
+        assert 'src="/static/header.js"' in body, path

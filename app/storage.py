@@ -14,6 +14,20 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def directory_size(path: Path) -> int:
+    """Total size in bytes of every file below ``path`` (0 when missing)."""
+    if not path.exists():
+        return 0
+    total = 0
+    for entry in path.rglob("*"):
+        try:
+            if entry.is_file():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 class Store:
     def __init__(self, root: Path | None = None):
         self.paths = ensure_data_dirs(root)
@@ -42,6 +56,11 @@ class Store:
     def dataset(self, accession: str) -> sqlite3.Row | None:
         with self._lock:
             return self.connection.execute("SELECT * FROM datasets WHERE accession = ?", (accession,)).fetchone()
+
+    def datasets(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self.connection.execute("SELECT * FROM datasets ORDER BY updated_at DESC").fetchall()
+            return [dict(row) for row in rows]
 
     def save_dataset(self, accession: str, path: Path, metadata: dict[str, Any]) -> None:
         now = utc_now()
@@ -76,6 +95,18 @@ class Store:
     def analysis(self, analysis_id: str) -> sqlite3.Row | None:
         with self._lock:
             return self.connection.execute("SELECT * FROM analyses WHERE id = ?", (analysis_id,)).fetchone()
+
+    def analyses_for(self, accession: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self.connection.execute("SELECT * FROM analyses WHERE accession = ?", (accession,)).fetchall()
+            return [dict(row) for row in rows]
+
+    def delete_dataset(self, accession: str) -> None:
+        """Remove a dataset and its saved analyses, respecting the foreign key."""
+        with self._lock:
+            self.connection.execute("DELETE FROM analyses WHERE accession = ?", (accession,))
+            self.connection.execute("DELETE FROM datasets WHERE accession = ?", (accession,))
+            self.connection.commit()
 
     def update_analysis_config(self, analysis_id: str, config: dict[str, Any]) -> None:
         with self._lock:

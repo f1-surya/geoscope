@@ -37,18 +37,5 @@ async function loadHistory() {
   }
 }
 
-async function quit() {
-  const status = $('quit-status');
-  if (!window.confirm('Stop GEOscope? The local server will shut down.')) return;
-  status.textContent = 'Shutting down...';
-  try {
-    await request('/api/shutdown', {method: 'POST'});
-    document.body.innerHTML = '<main><h1>GEOscope has stopped.</h1><p>You can close this tab.</p></main>';
-  } catch (error) {
-    status.textContent = error.message;
-  }
-}
-
 $('start-form').addEventListener('submit', startAnalysis);
-$('quit').addEventListener('click', quit);
 loadHistory();

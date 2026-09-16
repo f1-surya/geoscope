@@ -10,6 +10,7 @@ import threading
 import uuid
 import webbrowser
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 # PyInstaller windowed builds (Windows, and macOS .app) leave sys.stdout and
@@ -34,12 +35,12 @@ from pydantic import BaseModel, Field
 
 from .analysis import analyze
 from .export import export_report, export_table
-from .geo.acquisition import load_dataset, load_dataset_info, load_platform, validate_accession
+from .geo.acquisition import dataset_info as dataset_summary, load_dataset, load_dataset_info, load_platform, validate_accession
 from .geo.parsing import assemble_long, build_mapping, clean_gene_values, detect_assignment_column
 from .geo.soft import platform_cache_paths
 from .plotting import PALETTES, create_plot
 from .progress import progress_tracker
-from .storage import Store
+from .storage import Store, directory_size
 
 BASE = Path(__file__).parent
 STATIC_DIR = (BASE / "static").resolve()
@@ -74,6 +75,11 @@ def analysis_page(analysis_id: str):
     if not store.analysis(analysis_id):
         raise HTTPException(status_code=404, detail="Analysis not found")
     return FileResponse(BASE / "templates" / "analysis-detail.html")
+
+
+@app.get("/storage", response_class=FileResponse)
+def storage_page():
+    return FileResponse(BASE / "templates" / "storage.html")
 
 
 @app.get("/static/{filename}")
@@ -120,6 +126,92 @@ def dataset_info(accession: str):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return load_dataset_info(accession, store)
+
+
+def _within(path: Path, root: Path) -> bool:
+    resolved = path.resolve()
+    return resolved != root and root in resolved.parents
+
+
+def _remove_tree(path: Path, root: Path) -> int:
+    if not path.exists():
+        return 0
+    if not _within(path, root):
+        raise HTTPException(status_code=400, detail="Refusing to delete a path outside the data directory")
+    freed = directory_size(path)
+    shutil.rmtree(path, ignore_errors=True)
+    return freed
+
+
+def _dataset_storage_report() -> dict[str, Any]:
+    datasets = []
+    total_bytes = 0
+    for row in store.datasets():
+        accession = row["accession"]
+        dataset_path = Path(row["path"])
+        metadata = json.loads(row["metadata"])
+        info = dataset_summary(metadata)
+        if (dataset_path / "phenotype.parquet").exists():
+            status = "ready"
+        elif dataset_path.exists():
+            status = "incomplete"
+        else:
+            status = "missing"
+        dataset_bytes = directory_size(dataset_path)
+        raw_path = store.paths["raw"] / f"{accession}_family.soft.gz"
+        raw_bytes = raw_path.stat().st_size if raw_path.is_file() else 0
+        total_bytes += dataset_bytes + raw_bytes
+        datasets.append(
+            {
+                "accession": accession,
+                "title": info["title"],
+                "organism": info["organism"],
+                "sample_count": info["sample_count"],
+                "probe_count": info["probe_count"],
+                "platform_ids": info["platform_ids"],
+                "status": status,
+                "dataset_size": dataset_bytes,
+                "raw_size": raw_bytes,
+                "total_size": dataset_bytes + raw_bytes,
+                "analyses_count": len(store.analyses_for(accession)),
+                "updated_at": row["updated_at"],
+            }
+        )
+    return {"total_bytes": total_bytes, "datasets": datasets}
+
+
+@app.get("/api/datasets")
+def list_datasets():
+    return _dataset_storage_report()
+
+
+@app.delete("/api/datasets/{accession}")
+def delete_dataset(accession: str):
+    try:
+        accession = validate_accession(accession)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    row = store.dataset(accession)
+    if not row:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    freed = 0
+    dataset_root = store.paths["datasets"].resolve()
+    analyses_root = store.paths["analyses"].resolve()
+    raw_root = store.paths["raw"].resolve()
+
+    freed += _remove_tree(Path(row["path"]), dataset_root)
+    for analysis in store.analyses_for(accession):
+        freed += _remove_tree(Path(analysis["result_path"]), analyses_root)
+    raw_path = store.paths["raw"] / f"{accession}_family.soft.gz"
+    if raw_path.is_file() and _within(raw_path, raw_root):
+        freed += raw_path.stat().st_size
+        raw_path.unlink()
+
+    store.delete_dataset(accession)
+    progress_tracker.clear(accession)
+    logger.info("Deleted dataset %s (%d bytes freed)", accession, freed)
+    return {"deleted": accession, "freed_bytes": freed}
 
 
 @app.get("/api/datasets/progress/{accession}")
