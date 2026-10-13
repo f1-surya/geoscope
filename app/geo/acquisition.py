@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import ssl
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -64,45 +65,66 @@ def _build_ssl_context() -> ssl.SSLContext:
 
 _SSL_CONTEXT = _build_ssl_context()
 
+_download_locks_guard = threading.Lock()
+_download_locks: dict[Path, threading.Lock] = {}
+
+
+def _download_lock(target: Path) -> threading.Lock:
+    """Return the lock guarding writes to a download target.
+
+    Concurrent callers for the same target would otherwise share the same
+    ``.part`` file and interleave writes, corrupting the download.
+    """
+    with _download_locks_guard:
+        lock = _download_locks.get(target)
+        if lock is None:
+            lock = threading.Lock()
+            _download_locks[target] = lock
+        return lock
+
 
 def _download_file(url: str, target: Path, progress: Any | None = None) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and target.stat().st_size > 0:
         logger.debug("Using cached download %s", target)
         return target
-    partial = target.with_suffix(target.suffix + ".part")
-    last_error: Exception | None = None
-    logger.info("Downloading %s", url)
-    for attempt in range(3):
-        try:
-            if partial.exists():
-                partial.unlink()
-            request = urllib.request.Request(url, headers={"User-Agent": "GEOscope/0.1"})
-            with urllib.request.urlopen(request, timeout=120, context=_SSL_CONTEXT) as response, partial.open("wb") as output:
-                length = response.headers.get("Content-Length")
-                total = int(length) if length and length.isdigit() else None
-                downloaded = 0
-                if progress is not None:
-                    progress.bytes(0, total)
-                while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    output.write(chunk)
-                    downloaded += len(chunk)
-                    if progress is not None:
-                        progress.bytes(downloaded, total)
-            if partial.stat().st_size == 0:
-                raise RuntimeError("NCBI returned an empty GEO file")
-            partial.replace(target)
-            logger.info("Downloaded %s (%d bytes)", target.name, target.stat().st_size)
+    with _download_lock(target):
+        if target.exists() and target.stat().st_size > 0:
+            logger.debug("Using cached download %s", target)
             return target
-        except Exception as exc:
-            last_error = exc
-            logger.warning("Download attempt %d/3 failed for %s: %s", attempt + 1, url, exc)
-            time.sleep(2**attempt)
-    logger.error("Giving up downloading %s", url)
-    raise RuntimeError(f"HTTPS download failed for {url}: {last_error}") from last_error
+        partial = target.with_suffix(target.suffix + ".part")
+        last_error: Exception | None = None
+        logger.info("Downloading %s", url)
+        for attempt in range(3):
+            try:
+                if partial.exists():
+                    partial.unlink()
+                request = urllib.request.Request(url, headers={"User-Agent": "GEOscope/0.1"})
+                with urllib.request.urlopen(request, timeout=120, context=_SSL_CONTEXT) as response, partial.open("wb") as output:
+                    length = response.headers.get("Content-Length")
+                    total = int(length) if length and length.isdigit() else None
+                    downloaded = 0
+                    if progress is not None:
+                        progress.bytes(0, total)
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                        downloaded += len(chunk)
+                        if progress is not None:
+                            progress.bytes(downloaded, total)
+                if partial.stat().st_size == 0:
+                    raise RuntimeError("NCBI returned an empty GEO file")
+                partial.replace(target)
+                logger.info("Downloaded %s (%d bytes)", target.name, target.stat().st_size)
+                return target
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Download attempt %d/3 failed for %s: %s", attempt + 1, url, exc)
+                time.sleep(2**attempt)
+        logger.error("Giving up downloading %s", url)
+        raise RuntimeError(f"HTTPS download failed for {url}: {last_error}") from last_error
 
 
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"

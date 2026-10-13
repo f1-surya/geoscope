@@ -38,6 +38,7 @@ from .export import export_report, export_table
 from .geo.acquisition import dataset_info as dataset_summary, load_dataset, load_dataset_info, load_platform, validate_accession
 from .geo.parsing import assemble_long, build_mapping, clean_gene_values, detect_assignment_column
 from .geo.soft import platform_cache_paths
+from .jobs import operations
 from .plotting import PALETTES, create_plot
 from .progress import progress_tracker
 from .storage import Store, directory_size
@@ -230,19 +231,29 @@ def dataset_load(payload: dict):
         accession = validate_accession(payload.get("accession", ""))
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    reporter = progress_tracker.reporter(accession, accession)
+    operation, owner = operations.acquire(accession, accession)
+    if not owner:
+        logger.info("Joining in-flight load of %s", accession)
+        try:
+            return operations.wait(operation)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    reporter = operation.reporter
     logger.info("Loading dataset %s", accession)
     try:
         result = load_dataset(accession, store, progress=reporter)
     except (ValueError, RuntimeError) as exc:
         logger.warning("Could not load dataset %s: %s", accession, exc)
         reporter.fail(str(exc))
+        operations.release(accession, operation, error=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Unexpected error loading dataset %s", accession)
         reporter.fail(str(exc))
+        operations.release(accession, operation, error=str(exc))
         raise
     reporter.succeed()
+    operations.release(accession, operation, result=result)
     return result
 
 
