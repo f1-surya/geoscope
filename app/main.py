@@ -21,11 +21,12 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
-from .logging_config import configure_logging
+from .logging_config import configure_logging, install_exception_logging
 from .paths import ensure_data_dirs
 
 LOG_PATH = configure_logging(ensure_data_dirs()["logs"])
 logger = logging.getLogger("geoscope")
+install_exception_logging()
 
 import pandas as pd
 import uvicorn
