@@ -1,27 +1,145 @@
-const state = { accession: '', platform: 0, assignmentColumn: 'gene_assignment', valueColumn: null, samples: [], fields: [], metadata: [], genes: [], selectedGenes: [], group: '', palette: 'Scientific', analysisId: '', paletteOptions: [], paletteMap: {}, datasetInfo: {} };
+const state = { accession: '', platform: 0, assignmentColumn: 'gene_assignment', valueColumn: null, samples: [], fields: [], metadata: [], genes: [], selectedGenes: [], group: '', palette: 'Scientific', analysisId: '', paletteOptions: [], paletteMap: {}, datasetInfo: {}, platformReady: false };
 const $ = id => document.getElementById(id);
 
-function show(step) {
-  document.querySelectorAll('.step').forEach(x => x.classList.toggle('active', x.id === step));
-  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('active', x.dataset.step === step));
+const STEPS = ['dataset', 'samples', 'genes', 'analysis', 'results'];
+const BLOCKERS = {
+  dataset: 'Load the dataset to begin.',
+  samples: 'Prepare a platform on the Dataset step before choosing samples.',
+  genes: 'Select at least two samples spanning two or more groups (two samples each) on the Samples step.',
+  analysis: 'Select at least one gene on the Genes step.',
+  results: 'Run an analysis to view results.',
+};
+let currentStep = 'dataset';
+
+function setStatus(message, tone) {
+  const status = $('workspace-status');
+  if (!status) return;
+  status.textContent = message || '';
+  status.classList.remove('busy', 'error', 'ok');
+  if (tone) status.classList.add(tone);
 }
 
 function setBusy(message, busy) {
-  const status = $('status');
-  status.textContent = message;
-  status.classList.remove('busy', 'error');
+  setStatus(message, busy ? 'busy' : '');
   $('load').disabled = busy;
   $('platform-load').disabled = busy;
 }
 
 function showError(error) {
-  const status = $('status');
-  status.textContent = error.message || String(error);
-  status.classList.remove('busy');
-  status.classList.add('error');
+  setStatus(error.message || String(error), 'error');
 }
 
-document.querySelectorAll('nav button').forEach(button => button.onclick = () => show(button.dataset.step));
+function selectedSampleNames() {
+  return [...document.querySelectorAll('#sample-list input:checked')].map(x => x.value);
+}
+
+function selectedGeneNames() {
+  return [...document.querySelectorAll('#gene-list input:checked')].map(x => x.value);
+}
+
+function selectionAnalysis() {
+  const selected = new Set(selectedSampleNames());
+  const counts = {};
+  let missing = 0;
+  state.metadata.forEach(row => {
+    if (!selected.has(row.sample)) return;
+    const value = row[state.group];
+    if (value === null || value === undefined || !String(value).trim()) { missing += 1; return; }
+    counts[value] = (counts[value] || 0) + 1;
+  });
+  const under = Object.keys(counts).filter(name => counts[name] < 2);
+  return { counts, missing, under, valid: missing === 0 && Object.keys(counts).length >= 2 && under.length === 0 };
+}
+
+function samplesReady() {
+  return selectionAnalysis().valid;
+}
+
+function isStepComplete(step) {
+  if (step === 'dataset') return state.platformReady;
+  if (step === 'samples') return state.platformReady && samplesReady();
+  if (step === 'genes') return isStepComplete('samples') && selectedGeneNames().length > 0;
+  if (step === 'analysis') return isStepComplete('genes') && Boolean(state.analysisId);
+  return false;
+}
+
+function isStepUnlocked(step) {
+  const index = STEPS.indexOf(step);
+  if (index < 0) return false;
+  return STEPS.slice(0, index).every(isStepComplete);
+}
+
+function renderStepper() {
+  document.querySelectorAll('#stepper li').forEach((item, index) => {
+    const step = item.dataset.step;
+    const complete = isStepComplete(step);
+    const unlocked = isStepUnlocked(step);
+    const active = step === currentStep;
+    item.classList.toggle('done', complete);
+    item.classList.toggle('unlocked', unlocked);
+    item.classList.toggle('locked', !unlocked);
+    item.classList.toggle('active', active);
+    const badge = item.querySelector('.stepper-index');
+    if (badge) badge.textContent = complete ? '✓' : String(index + 1);
+    const button = item.querySelector('button');
+    if (button) {
+      button.disabled = !unlocked;
+      button.title = unlocked ? '' : (BLOCKERS[step] || 'Complete the previous steps to continue.');
+      if (active) button.setAttribute('aria-current', 'step');
+      else button.removeAttribute('aria-current');
+    }
+  });
+  refreshStepActions();
+}
+
+function refreshStepActions() {
+  document.querySelectorAll('.step-actions .next').forEach(button => {
+    const section = button.closest('.step');
+    const ready = section && isStepComplete(section.id);
+    button.disabled = !ready;
+    button.title = ready ? '' : (BLOCKERS[button.dataset.next] || 'Complete this step to continue.');
+  });
+}
+
+function goTo(step) {
+  if (!$('stepper')) return;
+  currentStep = step;
+  document.querySelectorAll('.step').forEach(section => section.classList.toggle('active', section.id === step));
+  renderStepper();
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+document.querySelectorAll('#stepper button').forEach(button => {
+  button.onclick = () => {
+    const step = button.dataset.step;
+    if (!isStepUnlocked(step)) {
+      setStatus(BLOCKERS[step] || 'Complete the previous steps to continue.', 'error');
+      return;
+    }
+    setStatus('');
+    goTo(step);
+  };
+});
+
+document.querySelectorAll('.step-actions [data-back]').forEach(button => {
+  button.onclick = () => {
+    setStatus('');
+    goTo(button.dataset.back);
+  };
+});
+
+document.querySelectorAll('.step-actions [data-next]').forEach(button => {
+  button.onclick = () => {
+    const section = button.closest('.step');
+    if (!section || !isStepComplete(section.id)) {
+      setStatus(BLOCKERS[button.dataset.next] || 'Complete this step to continue.', 'error');
+      refreshStepActions();
+      return;
+    }
+    setStatus('');
+    goTo(button.dataset.next);
+  };
+});
 
 async function request(url, options) {
   const response = await fetch(url, options);
@@ -183,15 +301,18 @@ async function load() {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({accession})
     });
     state.accession = data.accession;
+    state.platformReady = false;
+    state.analysisId = '';
     $('accession-value').textContent = data.accession;
     mergeDatasetInfo(data.info || {accession: data.accession, title: data.title, sample_count: data.sample_count});
     $('platform').innerHTML = data.platforms.map(p => `<option value="${p.index}">${p.id}</option>`).join('');
-    show('dataset');
+    renderStepper();
     setBusy(data.cached ? 'Cached dataset loaded. Preparing platform...' : 'Download complete. Preparing platform...', true);
     if (data.platforms.length === 1) {
       await usePlatform();
     } else {
       setBusy('Select a platform, then choose Use platform.', false);
+      renderStepper();
     }
   } catch (error) {
     showError(error);
@@ -214,9 +335,11 @@ async function usePlatform() {
     const query = params.length ? `?${params.join('&')}` : '';
     const data = await request(`/api/datasets/${state.accession}/platforms/${state.platform}${query}`);
     if (data.requires_annotation_column) {
+      state.platformReady = false;
       $('annotation-column').innerHTML = data.annotation_columns.map(column => `<option value="${column}">${column}</option>`).join('');
       $('annotation-column-controls').hidden = false;
       setBusy('Choose the gene assignment column, then use the platform.', false);
+      renderStepper();
       return;
     }
     state.assignmentColumn = data.assignment_column;
@@ -238,6 +361,8 @@ async function usePlatform() {
     state.fields = data.phenotype_fields;
     state.metadata = data.phenotype_values;
     state.genes = data.genes;
+    state.analysisId = '';
+    state.platformReady = true;
     $('phenotype').innerHTML = data.phenotype_fields.map(x => `<option>${x}</option>`).join('');
     $('sample-count').textContent = `${data.samples.length} samples, ${data.rows.toLocaleString()} expression observations`;
     $('sample-list').innerHTML = data.samples.map(s => `<label class="gene"><input type="checkbox" value="${s}" checked> ${s}</label>`).join('');
@@ -247,10 +372,10 @@ async function usePlatform() {
     $('palette').innerHTML = state.paletteOptions.map(x => `<option>${x}</option>`).join('');
     $('palette').onchange = updateColorControls;
     $('analysis-summary').textContent = 'Select genes and a phenotype field, then run the analysis.';
-    $('phenotype').onchange = updatePhenotype;
     updatePhenotype();
     setBusy(`Loaded ${data.samples.length} samples and ${data.genes.length} mapped genes.`, false);
-    show('samples');
+    renderStepper();
+    goTo('samples');
   } catch (error) {
     showError(error);
   } finally {
@@ -261,23 +386,43 @@ async function usePlatform() {
 
 function updatePhenotype() {
   state.group = $('phenotype').value;
-  const counts = {};
-  const selectedSamples = new Set([...document.querySelectorAll('#sample-list input:checked')].map(x => x.value));
-  state.metadata.forEach(row => {
-    if (!selectedSamples.has(row.sample)) return;
-    const value = row[state.group];
-    if (value !== null && value !== undefined && String(value).trim()) counts[value] = (counts[value] || 0) + 1;
-  });
-  const entries = Object.entries(counts);
-  $('group-counts').innerHTML = entries.length
-    ? `<div class="group-summary"><table><thead><tr><th>Group</th><th>Included samples</th></tr></thead><tbody>${entries.map(([name, count]) => `<tr><td class="group-name">${name}</td><td class="group-count">${count}</td></tr>`).join('')}</tbody></table></div>`
-    : '<p>No group values are available for this field.</p>';
+  const analysis = selectionAnalysis();
+  const entries = Object.entries(analysis.counts);
+  if (!entries.length) {
+    $('group-counts').innerHTML = '<p>No group values are available for this field.</p>';
+  } else {
+    const table = `<div class="group-summary"><table><thead><tr><th>Group</th><th>Included samples</th></tr></thead><tbody>${entries.map(([name, count]) => `<tr class="${count < 2 ? 'group-under' : ''}"><td class="group-name">${escapeHtml(name)}</td><td class="group-count">${count}</td></tr>`).join('')}</tbody></table></div>`;
+    let note = '';
+    if (!analysis.valid) {
+      const problems = [];
+      if (analysis.missing) problems.push(`${analysis.missing} included sample(s) have no value for this field`);
+      if (analysis.under.length) problems.push(`${analysis.under.length} group(s) contain fewer than two samples`);
+      note = `<p class="group-hint">${problems.join('. ')}. Every group needs at least two included samples, and at least two groups are required.</p><button type="button" class="ghost" id="prune-groups">Keep only valid groups</button>`;
+    } else if (entries.length < 2) {
+      note = '<p class="group-hint">Select a field with at least two groups.</p>';
+    }
+    $('group-counts').innerHTML = table + note;
+    const prune = $('prune-groups');
+    if (prune) prune.onclick = pruneGroups;
+  }
   $('analysis-summary').textContent = `Grouping by ${state.group || 'the selected phenotype field'}. Select genes and run the analysis.`;
   updateColorControls();
 }
 
+function pruneGroups() {
+  const counts = selectionAnalysis().counts;
+  document.querySelectorAll('#sample-list input:checked').forEach(input => {
+    const row = state.metadata.find(record => record.sample === input.value);
+    const value = row ? row[state.group] : null;
+    const ok = value !== null && value !== undefined && String(value).trim() && counts[value] >= 2;
+    if (!ok) input.checked = false;
+  });
+  updatePhenotype();
+  renderStepper();
+}
+
 function currentGroups() {
-  const selected = new Set([...document.querySelectorAll('#sample-list input:checked')].map(x => x.value));
+  const selected = new Set(selectedSampleNames());
   return [...new Set(state.metadata.filter(row => selected.has(row.sample)).map(row => row[state.group]).filter(value => value !== null && value !== undefined && String(value).trim()).map(String))];
 }
 
@@ -296,8 +441,8 @@ function selectedColors() {
 async function runAnalysis() {
   try {
     state.group = $('phenotype').value;
-    state.selectedGenes = [...document.querySelectorAll('#gene-list input:checked')].map(x => x.value);
-    const selectedSamples = [...document.querySelectorAll('#sample-list input:checked')].map(x => x.value);
+    state.selectedGenes = selectedGeneNames();
+    const selectedSamples = selectedSampleNames();
     if (!state.selectedGenes.length) throw Error('Select at least one gene.');
     if (selectedSamples.length < 2) throw Error('Select at least two samples.');
     $('run').disabled = true;
@@ -309,7 +454,8 @@ async function runAnalysis() {
     });
     renderAnalysis(result);
     setBusy('Analysis complete.', false);
-    show('results');
+    renderStepper();
+    goTo('results');
     loadHistory();
   } catch (error) {
     $('run').disabled = false;
@@ -341,6 +487,7 @@ async function updateChart() {
 async function loadHistory() {
   try {
     if (!state.paletteOptions.length) state.paletteOptions = Object.keys(await request('/api/palettes'));
+    if (!$('history')) return;
     const rows = await request('/api/history');
     $('history').innerHTML = rows.length ? rows.map(row => `<button class="history-item" data-analysis-id="${row.id}">${row.config.accession} · ${row.config.genes.join(', ')} · ${row.config.group_column}</button>`).join('') : 'No analyses yet.';
     document.querySelectorAll('.history-item').forEach(item => item.onclick = () => openAnalysis(item.dataset.analysisId));
@@ -353,7 +500,8 @@ async function openAnalysis(analysisId) {
     const result = await request(`/api/analyses/${analysisId}`);
     renderAnalysis(result);
     setBusy('Saved analysis opened.', false);
-    show('results');
+    renderStepper();
+    goTo('results');
   } catch (error) {
     showError(error);
   }
@@ -369,16 +517,20 @@ $('platform-load').onclick = usePlatform;
 $('run').onclick = runAnalysis;
 $('update-chart').onclick = updateChart;
 $('gene-search').oninput = filterGenes;
-$('sample-list').onchange = updatePhenotype;
+$('phenotype').onchange = () => { updatePhenotype(); renderStepper(); };
+$('sample-list').onchange = () => { updatePhenotype(); renderStepper(); };
+$('gene-list').onchange = renderStepper;
+renderStepper();
 loadHistory();
 
 const initialAccession = new URLSearchParams(window.location.search).get('accession');
 if (initialAccession) {
   state.accession = initialAccession;
   $('accession-value').textContent = initialAccession;
+  $('workspace').hidden = false;
   fetchDatasetInfo(initialAccession);
+  goTo('dataset');
 } else {
-  $('load-section').hidden = true;
   $('workspace').hidden = true;
   $('no-accession').hidden = false;
 }
