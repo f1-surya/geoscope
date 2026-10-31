@@ -6,8 +6,6 @@ running non-parametric group comparisons for selected genes. It downloads a GEO
 series, extracts sample phenotype metadata and platform annotations, and presents
 the whole workflow in a browser UI — no R or Quarto needed at runtime.
 
-The analysis pipeline mirrors the workflow in `paridhi_TALL_GSEIDs_Notebook.qmd`.
-
 ## Features
 
 - **Load any GEO series** by accession (for example `GSE48558`). Series metadata
